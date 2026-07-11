@@ -1,0 +1,18 @@
+# CMake build directories
+build/
+cmake-build-*/
+out/
+
+# CMake-generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# IDE and editor metadata
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
