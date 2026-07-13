@@ -17,3 +17,7 @@ target_link_libraries(hello-world
         bofeng::project_options
         bofeng::project_warnings
 )
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

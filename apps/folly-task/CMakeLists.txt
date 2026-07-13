@@ -16,3 +16,7 @@ target_link_libraries(folly-task
         folly_task_core
         bofeng::project_warnings
 )
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

@@ -16,6 +16,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Folly is provided by Homebrew, vcpkg, or another external package manager.
 find_package(folly CONFIG REQUIRED)
 
+# Define BUILD_TESTING before applications decide whether to add local tests.
+include(CTest)
+if(BUILD_TESTING)
+    find_package(GTest CONFIG REQUIRED)
+    include(GoogleTest)
+endif()
+
 # Shared language requirements inherited by every project target.
 add_library(bofeng_project_options INTERFACE)
 add_library(bofeng::project_options ALIAS bofeng_project_options)
@@ -39,9 +46,3 @@ endif()
 
 # Register all applications under apps/.
 add_subdirectory(apps)
-
-# BUILD_TESTING can be disabled with -DBUILD_TESTING=OFF.
-include(CTest)
-if(BUILD_TESTING)
-    add_subdirectory(tests)
-endif()

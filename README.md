@@ -16,6 +16,7 @@ and is not copied into this repository.
 - CMake 3.24 or newer
 - A compiler with C++23 support
 - Folly and its dependencies
+- GoogleTest when tests are enabled
 
 ### macOS with Homebrew
 
@@ -28,7 +29,7 @@ xcode-select --install
 Install CMake and Folly:
 
 ```sh
-brew install cmake folly
+brew install cmake folly googletest
 ```
 
 ## Configure and build

@@ -3,8 +3,9 @@ add_executable(folly_task_tests TaskExampleTest.cpp)
 target_link_libraries(folly_task_tests
     PRIVATE
         folly_task_core
+        GTest::gtest_main
         bofeng::project_options
         bofeng::project_warnings
 )
 
-add_test(NAME folly_task_tests COMMAND folly_task_tests)
+gtest_discover_tests(folly_task_tests)
