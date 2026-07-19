@@ -10,6 +10,6 @@ namespace helloworld {
 [[nodiscard]] std::string greeting(std::string_view name);
 
 [[nodiscard]] std::string formatTools(
-   const std::vector<std::string>& tools);
+    const std::vector<std::string>& tools);
 
 }  // namespace helloworld
