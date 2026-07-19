@@ -57,7 +57,7 @@ Both applications accept an optional name:
 ```
 
 Without a name, they use `developer`. The `folly-task` executor uses two worker
-threads by default; set `--executor_threads=N` to choose another positive count.
+threads by default; set `--executor_threads=N` to choose `2`, `4`, or `6`.
 
 ## Run the tests
 
