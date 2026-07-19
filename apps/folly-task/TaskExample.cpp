@@ -12,24 +12,24 @@
 namespace follytask {
 
 TaskExample::TaskExample(const std::chrono::milliseconds delay)
-    : delay_{delay} {}
+   : delay_{delay} {}
 
 folly::coro::Task<int> TaskExample::loadAnswer() const {
-  co_await folly::coro::sleep(delay_);
-  co_return 42;
+   co_await folly::coro::sleep(delay_);
+   co_return 42;
 }
 
 folly::coro::Task<std::string> TaskExample::makeMessage(
-    std::string name) const {
-  std::cout << "Started on worker thread " << std::this_thread::get_id()
-            << ".\n";
+   std::string name) const {
+   std::cout << "Started on worker thread " << std::this_thread::get_id()
+      << ".\n";
 
-  // A child Task inherits the executor of the coroutine that awaits it.
-  const int answer = co_await loadAnswer();
+   // A child Task inherits the executor of the coroutine that awaits it.
+   const int answer = co_await loadAnswer();
 
-  std::cout << "Resumed on worker thread " << std::this_thread::get_id()
-            << ".\n";
-  co_return folly::sformat(
+   std::cout << "Resumed on worker thread " << std::this_thread::get_id()
+      << ".\n";
+   co_return folly::sformat(
       "Hello, {}. The answer is {}.", std::move(name), answer);
 }
 

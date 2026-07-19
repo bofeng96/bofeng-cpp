@@ -9,10 +9,14 @@ target_link_libraries(folly_task_core
         bofeng::project_warnings
 )
 
-add_executable(folly-task main.cpp)
+add_executable(folly-task
+    TaskConfig.cpp
+    main.cpp
+)
 
 target_link_libraries(folly-task
     PRIVATE
+        bofeng::flags
         folly_task_core
         bofeng::project_warnings
 )

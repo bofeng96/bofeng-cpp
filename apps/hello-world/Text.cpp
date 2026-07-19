@@ -6,11 +6,11 @@
 namespace helloworld {
 
 std::string greeting(std::string_view name) {
-  return folly::sformat("Hello, {}! Welcome to Folly.", name);
+   return folly::sformat("Hello, {}! Welcome to Folly.", name);
 }
 
 std::string formatTools(const std::vector<std::string>& tools) {
-  return folly::join(" | ", tools);
+   return folly::join(" | ", tools);
 }
 
 }  // namespace helloworld

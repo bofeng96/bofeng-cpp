@@ -15,6 +15,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Folly is provided by Homebrew, vcpkg, or another external package manager.
 find_package(folly CONFIG REQUIRED)
+find_package(gflags CONFIG REQUIRED)
 
 # Define BUILD_TESTING before applications decide whether to add local tests.
 include(CTest)
@@ -43,6 +44,9 @@ elseif(MSVC)
         INTERFACE /W4 /permissive-
     )
 endif()
+
+# Register reusable project libraries before the applications that consume them.
+add_subdirectory(common)
 
 # Register all applications under apps/.
 add_subdirectory(apps)
