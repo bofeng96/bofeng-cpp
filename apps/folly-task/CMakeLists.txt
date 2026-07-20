@@ -10,6 +10,7 @@ target_link_libraries(folly_task_core
 )
 
 add_executable(folly-task
+    TaskApplication.cpp
     TaskConfig.cpp
     main.cpp
 )
