@@ -5,6 +5,27 @@ when it was written. Folly publishes frequently and makes no ABI-compatibility
 guarantee from commit to commit. Treat names and signatures as versioned; treat
 the architectural relationships in this guide as the durable knowledge.
 
+## Table of contents
+
+1. [What Folly is](#1-what-folly-is)
+2. [The whole system in one picture](#2-the-whole-system-in-one-picture)
+3. [Foundation types and value handling](#3-foundation-types-and-value-handling)
+4. [Byte ownership and zero-copy I/O](#4-byte-ownership-and-zero-copy-io)
+5. [Thread synchronization and concurrent data](#5-thread-synchronization-and-concurrent-data)
+6. [Executors: where runnable work runs](#6-executors-where-runnable-work-runs)
+7. [`EventBase`: the I/O reactor](#7-eventbase-the-io-reactor)
+8. [Futures: callback-based asynchronous composition](#8-futures-callback-based-asynchronous-composition)
+9. [Coroutines: direct-style asynchronous composition](#9-coroutines-direct-style-asynchronous-composition)
+10. [Fibers: stackful cooperative concurrency](#10-fibers-stackful-cooperative-concurrency)
+11. [Context propagation, configuration, and observability](#11-context-propagation-configuration-and-observability)
+12. [Build, versioning, and portability](#12-build-versioning-and-portability)
+13. [A decision guide](#13-a-decision-guide)
+14. [Failure modes worth memorizing](#14-failure-modes-worth-memorizing)
+15. [Reading the repository's `folly-task` example correctly](#15-reading-the-repositorys-folly-task-example-correctly)
+16. [A practical learning sequence](#16-a-practical-learning-sequence)
+17. [Subsystem inventory](#17-subsystem-inventory)
+18. [Official references](#18-official-references)
+
 ## 1. What Folly is
 
 Folly is Meta's collection of C++20 components for production systems. It is
@@ -30,6 +51,46 @@ equivalent-looking Folly type exists.
 Do not depend on `folly::detail`, `folly::internal`, or implementation headers.
 Avoid experimental APIs unless accepting upgrade breakage is an explicit
 decision.
+
+### Evaluation at a glance
+
+| Dimension | Strength | Cost or limitation |
+| --- | --- | --- |
+| Async runtime | Executors, Futures, coroutines, fibers, cancellation, timers, and I/O share a composable execution model. | There are several generations of async APIs, so a codebase needs a deliberate primary model and boundary adapters. |
+| Networking | `EventBase`, transports, sockets, TLS, timers, and `IOBuf` form a proven low-level stack. | It is infrastructure, not a complete HTTP/RPC framework; thread affinity and lifetime rules are sharp. |
+| Performance primitives | F14, arenas, specialized queues, thread caches, hazard pointers, and RCU cover demanding hot paths. | Many types trade generality for speed. Their contracts must be learned and benchmarked against the actual workload. |
+| Correctness tools | `Synchronized`, explicit executors, move-only operations, result carriers, and newer safe coroutine types expose ownership and execution. | Older or lower-level APIs still permit dangling references, accidental blocking, and unstructured background work. |
+| Portability | Folly supports major desktop/server platforms and wraps many platform differences. | Some facilities are Linux- or architecture-sensitive, and optimized paths may differ from fallbacks. |
+| Integration | Components can usually be adopted individually at the API level. | The build brings a substantial dependency graph, and Folly does not promise commit-to-commit ABI compatibility. |
+| Documentation | Important headers contain unusually detailed contracts and examples. | Coverage is uneven; source comments and tests are often more current than narrative documents. |
+
+### When Folly is a good fit
+
+Folly is compelling when a project needs several of these together:
+
+- executor-aware asynchronous services;
+- high-throughput networking with buffer chaining and minimal copying;
+- carefully controlled CPU and I/O scheduling;
+- specialized concurrent or read-mostly data structures;
+- performance measurement and tuning on known deployment platforms;
+- compatibility with other Meta open-source C++ projects.
+
+It is often excessive for a small portable library, a short-lived command-line
+program, or a project that only needs one utility already available in C++20/23.
+The integration and upgrade cost should be justified by system-level value.
+
+### Adoption questions
+
+Before choosing a Folly component, answer:
+
+1. What exact contract or measured bottleneck is missing from `std` or an
+   existing dependency?
+2. Which executor or event loop owns the work, and where may it block?
+3. Who owns every object, buffer, callback, and coroutine frame until
+   completion?
+4. How are timeout, cancellation, failure, and shutdown propagated?
+5. Does the target platform use the optimized implementation or a fallback?
+6. Can Folly and all dependents be pinned and rebuilt together during upgrades?
 
 ## 2. The whole system in one picture
 
@@ -89,9 +150,18 @@ unless a Folly API or Folly-specific operation makes `StringPiece` useful.
 - `small_vector<T, N>` keeps a small number of elements inline, avoiding a heap
   allocation until it grows beyond its inline capacity.
 
+For one-byte characters on a 64-bit build, the installed `fbstring` core uses
+three storage categories: small strings are stored inline, medium strings use
+an allocation and copy eagerly, and large strings use reference-counted storage
+with lazy copying. The current thresholds are 0–23, 24–254, and 255+ characters,
+respectively, but those are implementation details rather than a portable API
+contract. Allocations use Folly's allocator-size helpers and can benefit from
+jemalloc-aware builds.
+
 Default to standard containers. Switch only after measuring or when an API
 requires the Folly type. Inline containers increase the size of every owning
-object, so a larger `N` is not automatically better.
+object, so a larger `N` is not automatically better. Likewise, do not assume
+`fbstring` beats a modern `std::string` for every size and workload.
 
 ### `Arena`, `SysArena`, and `ThreadCachedArena`
 
@@ -184,6 +254,30 @@ types rather than spreading `dynamic` through business logic.
 Conversion is a validation boundary. Prefer checked conversion over C-style
 parsing or unchecked narrowing.
 
+### RAII, lifetime, and operating-system helpers
+
+- `ScopeGuard`, `SCOPE_EXIT`, `SCOPE_FAIL`, and `SCOPE_SUCCESS` attach cleanup
+  to lexical scope. Prefer ordinary RAII types when a reusable owner exists;
+  use a scope guard for local rollback and cleanup logic.
+- `File` is an owning file-descriptor wrapper. `FileUtil` supplies common file
+  operations, and `Subprocess` manages child processes and pipes.
+- `Indestructible<T>` deliberately avoids static destruction. `Singleton`
+  coordinates more complex process-lifetime ordering. Both solve narrow
+  lifetime problems; neither makes hidden global state desirable.
+- `Lazy` and `ConcurrentLazy` defer construction, with different concurrency
+  contracts.
+- `Poly` builds non-intrusive, type-erased interfaces with value/reference
+  forms. It is powerful but more elaborate than a virtual base class or a
+  simple `Function`; choose it when value-semantic polymorphism is the goal.
+
+### Algorithms and sequence processing
+
+Folly includes map helpers, bit and hash functions, sorted-vector containers,
+and the `gen` library for lazy pipeline-style sequence processing. In portable
+new code, compare `gen` with C++20 ranges before committing to a Folly-specific
+pipeline. `sorted_vector_map`/`sorted_vector_set` are useful when data changes
+rarely and compact ordered iteration matters more than insertion cost.
+
 ## 4. Byte ownership and zero-copy I/O
 
 ### `IOBuf`
@@ -217,6 +311,16 @@ are preferable to manual pointer arithmetic for protocol codecs.
 
 The zero-copy rule is: preserve chains and shared slices for as long as
 possible; coalesce only at an unavoidable boundary.
+
+### Codecs and compression
+
+The codec and compression directories add hex/UUID helpers, varint encodings,
+and codec wrappers for algorithms such as zlib and Zstandard. Compression APIs
+can reuse contexts through pools to avoid repeated setup cost.
+
+Treat codecs as boundary components: enforce output limits, validate malformed
+input, and make decompression-bomb protection explicit. Availability and exact
+codec set depend on how Folly and its optional dependencies were built.
 
 ## 5. Thread synchronization and concurrent data
 
@@ -317,6 +421,20 @@ Executor affinity is not thread affinity. A task bound to a CPU pool can resume
 on a different worker after suspension. Event-base-affine objects are stricter:
 most of their methods must be called on their owning event-loop thread.
 
+### Other executor forms
+
+| Executor | Role |
+| --- | --- |
+| `InlineExecutor` | Runs submitted work immediately on the caller. Useful only when reentrancy and stack growth are acceptable. |
+| `ManualExecutor` / drivable executors | Queue work until explicitly driven; valuable for deterministic tests and synchronous bridges. |
+| `SerialExecutor`, `SequencedExecutor`, and strand-style executors | Preserve sequencing over another execution resource without implying a dedicated thread. |
+| `ScheduledExecutor` | Adds time-based scheduling to the executor model. |
+| `MeteredExecutor` | Wraps execution with admission/queue controls and measurements. |
+| Global CPU/I/O executors | Convenient process-wide defaults; explicit injection is easier to test and isolate. |
+
+An executor wrapper changes scheduling semantics, not the nature of the work.
+For example, serialization does not make blocking work safe on an I/O thread.
+
 ## 7. `EventBase`: the I/O reactor
 
 `EventBase` waits for file-descriptor readiness and timers, then invokes
@@ -343,6 +461,15 @@ Common I/O building blocks include:
 - `IPAddress`, `SocketAddress`, and URI helpers;
 - SSL/TLS transports and contexts;
 - `IOBuf`/`IOBufQueue` for payloads.
+
+UDP sockets, signal handlers, pipes, and coroutine transport adapters extend
+the same event-base model. Linux builds may offer epoll and io_uring backends;
+code should not assume those optimized paths exist on every target.
+
+Many async transports use delayed-destruction patterns because callbacks may
+still be on the stack when shutdown begins. Follow each transport's documented
+close and destruction protocol rather than applying ordinary immediate
+`delete` reasoning.
 
 These are lower-level building blocks, not a complete HTTP/RPC framework.
 
@@ -383,69 +510,325 @@ not imply identical cleanup of unfinished work.
 Blocking `.get()` and `.wait()` belong at synchronous program boundaries.
 Calling them on a worker/event-loop thread needed for completion can deadlock.
 
+### Future ownership, failure, and interruption
+
+Future handles are generally consumed as chains are built, which is why Folly
+examples repeatedly use `std::move(future)`. A `Promise` must be completed once;
+destroying the producer without a result makes the consumer observe a broken
+promise. Exceptions travel through the shared state until a `thenTry`,
+`thenError`, or blocking boundary handles them.
+
+Future interruption is advisory. Raising an interrupt only has an effect when
+the producer registered an interrupt handler, and completion can race with the
+request. This is the same broad principle as coroutine cancellation: request,
+cooperate, and still join or otherwise account for completion.
+
+### Futures versus coroutines
+
+Use Futures when an API is callback-native, when a continuation graph is the
+natural representation, or when integrating a Future-heavy subsystem. Use
+coroutines when direct control flow, loops, scoped local state, and exception
+handling make the operation easier to read. Both still require explicit
+executor, cancellation, and lifetime design; coroutine syntax does not remove
+those responsibilities.
+
 ## 9. Coroutines: direct-style asynchronous composition
 
 Folly coroutines use C++ language suspension while preserving Folly executor,
-cancellation, and async-stack integration.
+cancellation, request-context, and async-stack integration. The syntax looks
+sequential, but execution remains lazy, executor-driven, and cooperative.
 
-### `Task<T>` and executor binding
+### The task family: which type to use
 
-`folly::coro::Task<T>` is a move-only, single-use, lazy computation. Calling a
-task-returning function creates a coroutine frame but does not run its body.
+The installed Folly version contains both the established movable `Task` API
+and newer task wrappers designed to prevent coroutine lifetime bugs.
+
+| Type | Meaning and appropriate use |
+| --- | --- |
+| `Task<T>` | Established move-only, single-use, lazy task. It can be stored and moved before being awaited, which is flexible but can extend borrowed data beyond its lifetime. It remains important for existing APIs and interoperability. |
+| `TaskWithExecutor<T>` | A `Task` after explicit executor binding. It is still lazy, but may be awaited from anywhere or eagerly started. Usually create it with `co_withExecutor`, not as a public return type. |
+| `now_task<T>` (`NowTask<T>`) | Newer immovable task that must be awaited in the full expression that creates it. Where supported, Folly's header recommends it as the safer default because C++ lifetime extension protects many temporary/reference cases. |
+| `safe_task<Safety, T>` | Movable wrapper with compile-time alias/lifetime checks. Most users select aliases such as `value_task`, `member_task`, `closure_task`, or `auto_safe_task` rather than spelling the safety level. |
+
+The safe-task family is evolving and compiler/configuration dependent. Pin the
+Folly version before making it a public API. For learning Folly and integrating
+with established code, understand `Task` first; for new production coroutine
+APIs, evaluate `now_task` and the safe aliases rather than defaulting to a
+movable task.
+
+### `Task<T>` semantics
+
+`folly::coro::Task<T>` is a lazy description of one computation that will
+eventually produce a value or exception. It is neither a thread nor a reusable
+job object.
 
 ```cpp
 folly::coro::Task<Response> fetch(Request request) {
-  auto bytes = co_await read(request);
+  auto bytes = co_await read(std::move(request));
   co_return decode(bytes);
 }
 ```
 
-Awaiting an unbound child task binds it to the parent task's executor.
-`co_withExecutor(keepAlive, task)` explicitly binds a root task and returns a
-still-lazy `TaskWithExecutor<T>`. `start()` eagerly schedules that bound task
-and returns a `SemiFuture<T>`.
+Calling `fetch()` allocates/creates its coroutine frame and captures its
+parameters, then initially suspends before executing the body. Value parameters
+live in the frame; reference parameters remain borrowed references.
 
-### Async concurrency and synchronization
+```text
+call coroutine function
+        |
+        v
+create frame + capture parameters + initial suspend
+        |
+        | co_await / bind-and-start / blockingWait
+        v
+run until completion or next incomplete co_await
+        |
+        | incomplete awaitable
+        v
+suspend frame; executor thread runs other work
+        |
+        v
+resume on bound executor -> co_return or exception
+        |
+        v
+resume awaiting coroutine / complete future -> destroy frame when owner releases it
+```
 
-Important coroutine primitives include:
+`Task<void>` completes without a C++ value. At Future boundaries Folly uses
+`folly::Unit` where a concrete value type is required.
 
-- `sleep` and timed-wait helpers;
-- `Baton`, `Mutex`, `SharedMutex`, `Semaphore`, and channels designed to
-  suspend coroutines instead of blocking worker threads;
-- `collectAll`/`collectAny`-style coroutine combinators;
-- `AsyncScope` for dynamically adding concurrent work and later joining it;
-- async generators and stream/channel abstractions;
-- `blockingWait` only for synchronous boundaries and tests.
+### `co_await`, suspension, and executor stickiness
 
-Suspension is not blocking: the coroutine saves state and releases the worker
-to run other work. It also is not parallelism: two tasks run concurrently only
-when explicitly started/collected/scoped that way.
+`co_await child()` does three conceptual things:
 
-### Cancellation
+1. It evaluates and starts the lazy child task.
+2. It suspends the parent if the child cannot complete immediately.
+3. It resumes the parent with the child's value or rethrows its exception.
 
-`CancellationSource` requests cancellation. Copies of its `CancellationToken`
-are passed to operations. `CancellationCallback` bridges cancellation into an
-underlying callback API.
+An unbound child inherits the awaiting Folly task's executor. Folly arranges
+for the task to resume on that bound executor after asynchronous awaits, even
+when the awaited operation completes elsewhere. This is executor stickiness,
+not worker-thread stickiness: a CPU pool may select a different worker.
 
-Cancellation is cooperative, asynchronous, and race-prone by nature:
+```cpp
+folly::coro::Task<void> parent(folly::Executor::KeepAlive<> other) {
+  auto* original = co_await folly::coro::co_current_executor;
+  co_await child();  // child inherits original
+  co_await folly::coro::co_withExecutor(other, child());
+  // Parent resumes on original after the explicitly rebound child completes.
+}
+```
 
-- the request does not forcibly stop a thread;
-- an operation must observe the token or register a callback;
-- completion may win the race with cancellation;
-- cleanup and joining still matter after cancellation is requested.
+Use `co_current_executor` to inspect the current executor, not to infer a
+specific thread identity.
 
-Prefer scopes in which all child work is joined before captured state is
-destroyed. Detached work demands an explicit lifetime and error policy.
+### Starting a root task
 
-### Task lifetime rules
+A task awaited by another task gets its executor from the parent. A root task
+entered from synchronous or callback code needs an explicit boundary.
 
-- Moving/awaiting/binding a task consumes its single ownership.
-- A member coroutine normally retains `this`; the object must outlive it.
-- References and views captured in a coroutine frame must outlive every
-  suspension that can use them.
-- Exceptions propagate through `co_await` and are rethrown at a blocking edge
-  unless converted into a result type.
-- Never hold a normal thread mutex across `co_await`.
+| Boundary | Behavior |
+| --- | --- |
+| `co_await task` | Starts a child lazily and suspends the parent until it completes. |
+| `co_withExecutor(executor, task)` | Consumes the task, binds it, and returns a still-lazy `TaskWithExecutor`. |
+| `std::move(boundTask).start()` | Schedules eager execution and returns `SemiFuture<T>`. An overload accepts a completion callback and optional cancellation token. |
+| `std::move(task).semi()` | Bridges a task into the Future ecosystem; the resulting `SemiFuture` is activated when attached/driven. |
+| `blockingWait(awaitable)` | Drives an awaitable and blocks the calling thread. Reserve it for tests and top-level synchronous edges. |
+
+```cpp
+auto bound = folly::coro::co_withExecutor(keepAlive, fetch(request));
+folly::SemiFuture<Response> result = std::move(bound).start();
+Response response = std::move(result).get();  // synchronous edge only
+```
+
+`scheduleOn()` is the older spelling for binding a task and is deprecated in
+the installed version; prefer `co_withExecutor()`.
+
+### Sequential versus concurrent composition
+
+Creating several lazy tasks does not start them. Awaiting them one after
+another therefore executes them sequentially:
+
+```cpp
+auto a = fetchA();
+auto b = fetchB();
+auto va = co_await std::move(a);
+auto vb = co_await std::move(b);  // starts only after a completes
+```
+
+Use a collection primitive to express concurrency:
+
+```cpp
+auto [va, vb] = co_await folly::coro::collectAll(fetchA(), fetchB());
+```
+
+Collection starts each input in argument order until it first suspends. Tasks
+that complete synchronously can consequently still run sequentially on the
+current thread.
+
+| Combinator | Completion and failure semantics |
+| --- | --- |
+| `collectAll` | Waits for all. A failure requests cancellation of outstanding work, waits for completion, discards partial values, and rethrows one failure. |
+| `collectAllTry` | Waits for all and returns `Try<T>` for each input. A child failure does not request cancellation of the other children. |
+| `collectAllRange` / `collectAllTryRange` | Range/vector forms that preserve input order. Tasks stored in containers must be moved into the operation. |
+| `collectAllWindowed` | Processes a range with a maximum concurrency, providing an essential backpressure control. |
+| `collectAny` | Returns the index and `Try` of the first completion, requests cancellation of the remainder, and waits for them to complete before returning. |
+| `collectAnyWithoutException` | Returns the first success, or the final failure if every input fails. |
+| `collectAnyNoDiscard` | Cancels after the first completion but retains every final result, including cancellation outcomes. |
+
+“First result” does not imply abandoned work. The normal combinators account
+for remaining operations before returning. If cancellation is not supported,
+the wait can still last as long as the slowest child.
+
+### Structured dynamic concurrency
+
+`collectAll` is ideal when the child set is known at one expression.
+`AsyncScope` supports a dynamic number of concurrent `void`/`Unit` operations:
+
+```cpp
+folly::coro::AsyncScope scope;
+scope.add(folly::coro::co_withExecutor(executor, process(item1)));
+scope.add(folly::coro::co_withExecutor(executor, process(item2)));
+co_await scope.joinAsync();
+```
+
+Key rules:
+
+- An unbound `Task` cannot be passed directly to `AsyncScope::add`; bind its
+  executor first.
+- Added work must handle its errors according to the scope's policy and cannot
+  return a value that would be silently discarded.
+- After adding work, complete `joinAsync()` or `cleanup()` before destroying
+  the scope.
+- Do not add new unrelated work once joining/cleanup can complete.
+
+`CancellableAsyncScope` attaches a cancellation token to added work. It offers
+`requestCancellation()`, `joinAsync()`, and `cancelAndJoinAsync()`. Cancellation
+still depends on every child cooperating.
+
+Structured concurrency means the parent scope cannot finish while children
+that borrow its state are still running. Prefer this shape over fire-and-forget
+execution.
+
+### Cancellation and timeouts
+
+`CancellationSource` owns the ability to request cancellation. Copies of its
+`CancellationToken` are passed to consumers. `CancellationCallback` adapts a
+token to an underlying callback/cancel API.
+
+Within a Folly task:
+
+```cpp
+const auto& token =
+    co_await folly::coro::co_current_cancellation_token;
+if (token.isCancellationRequested()) {
+  co_yield folly::coro::co_stopped_may_throw;
+}
+```
+
+`co_withCancellation(token, awaitable)` injects a token only when the awaitable
+supports the customization; the generic fallback cannot magically make an
+uncancellable operation cancellable.
+
+Cancellation is cooperative and races with normal completion:
+
+- requesting cancellation does not stop an OS thread;
+- an operation must poll the token or register a callback;
+- either completion or cancellation may win;
+- resource cleanup and joining remain mandatory.
+
+`coro::timeout(operation, duration)` starts a timer, requests cancellation if
+the timer wins, waits for the child to respond, and reports `FutureTimeout`.
+Its latency therefore depends on cancellation responsiveness.
+`timeoutNoDiscard` preserves the child's eventual result rather than replacing
+it with the timeout result. `timed_wait` and `detachOnCancel` have different
+discard/detachment semantics and require a careful lifetime audit before use.
+
+### Errors and result transport
+
+An exception thrown from a task is stored in its coroutine state and rethrown
+by `co_await`, `SemiFuture::get()`, or `blockingWait()`. Normal `try`/`catch`
+works naturally around `co_await`.
+
+- `co_awaitTry(awaitable)` captures completion as `Try<T>` so the caller can
+  inspect a value or exception without immediately throwing.
+- `collectAllTry` applies that idea to concurrent children.
+- `result<T>` and `or_unwind` support value/error/stopped propagation without
+  making every expected failure take the throw/catch path.
+- `co_result` and `co_error` are lower-level completion adapters used by Folly
+  result-aware coroutine machinery.
+
+Choose one error vocabulary at an API boundary and document it. Mixing domain
+errors, exceptions, and stopped cancellation without a policy makes callers
+handle the same failure multiple ways.
+
+### Coroutine synchronization
+
+Thread-blocking primitives park an OS thread; coroutine primitives suspend only
+the current coroutine. Major `folly::coro` building blocks include:
+
+| Primitive | Use |
+| --- | --- |
+| `Baton` | One-shot notification from another coroutine/thread. |
+| `Mutex` / `SharedMutex` | Coroutine-aware exclusive/shared critical sections. |
+| `SharedLock` | RAII-style shared ownership of a coroutine lock. |
+| `Promise` / `SharedPromise` | One producer completing one or multiple coroutine consumers. |
+| `BoundedQueue`, `UnboundedQueue`, `SmallUnboundedQueue` | Async producer/consumer handoff with different capacity/allocation trade-offs. |
+| `SerialQueueRunner` | Serialize asynchronous operations without dedicating a thread. |
+
+Never hold `std::mutex`, `Synchronized::LockedPtr`, or another thread lock
+across `co_await`. The coroutine may suspend indefinitely while retaining the
+lock, and resumption may occur on another worker.
+
+### Streams, generators, and channels
+
+`AsyncGenerator<Reference>` represents a pull-based asynchronous sequence. A
+producer uses `co_yield`; a consumer awaits `next()`. Each request for the next
+item establishes executor affinity for that production step.
+
+Generators require explicit ownership thinking:
+
+- yielded references must remain valid until the consumer is finished with
+  that item;
+- a consumer may stop before draining the generator;
+- cleanable generators require their asynchronous `cleanup()` to be awaited.
+
+`AsyncPipe` and coroutine queues provide point-to-point streaming. The separate
+`folly::channels` library adds sender/receiver channels, transforms, merge,
+fan-out, multiplexing, processors, and rate limiting. Choose bounded channels
+or explicit concurrency windows when producers can outrun consumers.
+
+### Lifetime hazards in movable `Task`
+
+A movable lazy task can start much later than the expression that created it.
+Memorize these hazards:
+
+1. A reference parameter remains a reference in the coroutine frame; its
+   referent must survive until the task finishes.
+2. A non-static member coroutine retains `this`; the object must outlive all
+   awaits and children.
+3. Invoking a temporary coroutine lambda can leave the task referring to a
+   destroyed closure. Immediately await it, use `co_invoke`, or use the safer
+   closure/task facilities.
+4. Views, iterators, spans, and `StringPiece`s do not become owning merely
+   because they were captured in a frame.
+5. Detached work must own everything it touches and must have an explicit
+   error, cancellation, and shutdown policy.
+6. Destroying a never-started task destroys the frame without executing the
+   body.
+
+This is the motivation for `now_task`: preventing a task from being moved away
+from the full expression lets normal C++ temporary-lifetime extension protect
+many borrowed inputs. The safe-task aliases add compile-time constraints when
+a task genuinely must be movable or scheduled into another scope.
+
+### Testing tasks
+
+For a small synchronous unit test, `blockingWait(std::move(task))` is clear and
+appropriate. Folly also provides coroutine-aware GoogleTest helpers (`CO_TEST`
+families) for tests that should themselves be coroutines. Use zero-duration or
+controllable time sources instead of sleeping in unit tests, and use manual or
+drivable executors when scheduling order is part of the behavior under test.
 
 ## 10. Fibers: stackful cooperative concurrency
 
@@ -465,31 +848,130 @@ model per subsystem and use deliberate adapters at boundaries.
 
 ## 11. Context propagation, configuration, and observability
 
+### Request context
+
 Async execution breaks ordinary thread-local assumptions because one logical
 request can cross threads. `RequestContext` attaches request-scoped data that
 Folly-aware Futures, tasks, and fibers can capture and restore across async
 boundaries. It is useful for tracing and request metadata, but hidden context
 is still hidden coupling; use explicit parameters for core domain inputs.
 
-Other production primitives include:
+### Observers and settings
 
-- `folly::Init` for process initialization and integration with flags/logging;
-- the logging subsystem and glog integration;
-- `observer::Observer<T>` for derived, asynchronously refreshed configuration
-  snapshots;
-- settings APIs for runtime configuration;
-- histogram, quantile, timeseries, and thread-cached statistics;
-- tracing and async-stack support;
-- `Benchmark` and `BENCHMARK` macros for microbenchmarks;
-- `File`, file utilities, and `Subprocess` for OS integration;
-- `Singleton`, which manages difficult process-lifetime ordering but does not
-  make global state good design.
+`observer::Observer<T>` represents a value that is recomputed when its
+dependencies change. Readers take a stable snapshot; a later refresh does not
+mutate an existing snapshot. Prefer `with()` when a value is only needed inside
+one callback because it keeps the snapshot alive without letting references
+escape.
 
-Observers represent versioned snapshots, not mutable shared objects. Read a
-snapshot, use it consistently for an operation, and avoid assuming a refresh
-happens synchronously.
+Observer variants optimize different read patterns:
 
-## 12. A decision guide
+- `AtomicObserver` for atomically readable value types;
+- `TLObserver` for thread-local caching at additional memory cost;
+- read-mostly, hazard-pointer, and core-cached variants for specialized hot
+  read paths.
+
+A hazard-protected observer snapshot should not cross a coroutine suspension
+unless its contract explicitly permits it. Settings APIs provide related
+runtime configuration mechanisms. Treat refresh as asynchronous: one request
+should usually use one consistent snapshot.
+
+### Logging
+
+The logging subsystem provides categories, levels, handlers, formatters,
+asynchronous file writers, configuration parsing, rate limiting, and bridges to
+Google logging. `XLOG`-style macros avoid unnecessary formatting when a level
+is disabled.
+
+Logging is still I/O. An asynchronous writer moves cost off a request path but
+introduces queueing, flush, overload, and shutdown policy. Never assume a log
+statement is free or guaranteed to persist after an abrupt exit.
+
+### Metrics, tracing, and debugging
+
+- `BucketedTimeSeries`, `MultiLevelTimeSeries`, histograms, quantile
+  estimators, `TDigest`, and streaming statistics support in-process
+  aggregation.
+- Thread-cached counters reduce contention but trade away immediate global
+  freshness.
+- Async-stack integration preserves logical coroutine/Future ancestry across
+  physical stack breaks.
+- Symbolization, demangling, exception tracing, and stack-trace helpers aid
+  diagnostics, with capabilities varying by platform and build configuration.
+
+Metrics structures do not export themselves. A service still needs naming,
+collection, scraping/flush, cardinality, and shutdown policies.
+
+### Initialization, testing, and benchmarking
+
+- `folly::Init` coordinates process initialization and common flag/logging
+  setup. Create it near `main` before relying on parsed flags or global runtime
+  facilities.
+- `Benchmark` and `BENCHMARK` macros provide microbenchmark registration,
+  calibration, baselines, and formatted results.
+- Test utilities include temporary resources, deterministic/manual executors,
+  Future helpers, and coroutine-aware GoogleTest macros.
+
+Microbenchmarks explain primitive cost, not end-to-end service behavior. Test
+correctness under cancellation, shutdown, contention, and allocator pressure,
+then validate latency distributions in a representative workload.
+
+### Time, rate control, randomness, and hashing
+
+Folly includes high-resolution duration helpers, stopwatches, token buckets,
+timeout queues, schedulers, random generation, fingerprints, and multiple hash
+utilities. Use cryptographic facilities only when the API explicitly promises
+cryptographic properties; a fast hash or random helper is not automatically
+suitable for secrets, signatures, or adversarial input.
+
+## 12. Build, versioning, and portability
+
+### Version and ABI policy
+
+Folly uses date-based, frequent releases and evolves with Meta's internal
+codebase. It does not guarantee ABI compatibility from commit to commit. Pin a
+known-compatible revision or release, build dependents against the same
+version, and treat upgrades like source migrations rather than drop-in shared
+library replacements.
+
+The official project recommends static linking in part because of this ABI
+policy. A package-manager build is convenient for experimentation; production
+systems should control compiler, standard library, Folly revision, feature
+flags, and transitive dependency versions together.
+
+### Build-system integration
+
+Folly is C++20 and exposes the CMake target `Folly::folly` in common packaged
+installations. The official `getdeps.py` flow builds compatible dependencies
+and is the reference route when system packages are insufficient.
+
+The dependency graph commonly includes Boost, fmt, glog, gflags, libevent,
+double-conversion/fast-float, OpenSSL, and compression libraries. Exact
+requirements depend on platform and enabled features. Large headers and
+templates can also increase compile time; keep includes narrow and hide Folly
+types behind implementation boundaries when they are not part of the API.
+
+### Platform and feature checks
+
+The same public header may select architecture-specific intrinsics, an OS
+backend, or a portable fallback. Examples include F14 SIMD paths, epoll or
+io_uring I/O, allocator integration, stack symbolization, and coroutine support.
+
+Do not infer production behavior from one development machine. Build and test
+on every target architecture/OS, exercise the selected backend, and consult
+`folly-config.h`/portability feature macros when an API is conditional.
+
+### Upgrade discipline
+
+For an upgrade:
+
+1. Read release/source changes between pinned revisions.
+2. Rebuild Folly and all C++ dependents with one toolchain and standard library.
+3. Compile with deprecation warnings visible; migrate away from legacy aliases.
+4. Run concurrency, cancellation, teardown, sanitizer, and performance tests.
+5. Recheck platform fallbacks and optional codec/TLS availability.
+
+## 13. A decision guide
 
 | Need | Start with | Move to something else when |
 | --- | --- | --- |
@@ -503,13 +985,16 @@ happens synchronously.
 | Callback with move-only capture | `folly::Function` | The callback is borrowed rather than owned. |
 | Domain value/error | `Expected<T, E>` | Exception/stopped transport is needed: consider `result<T>`. |
 | Callback async API | `SemiFuture<T>` | Direct-style async is preferable: expose `coro::Task<T>`. |
-| New Folly async workflow | `coro::Task<T>` | An existing subsystem is Future- or fiber-native. |
+| New immediately-awaited Folly coroutine | `coro::now_task<T>` where supported | Delayed/movable scheduling is genuinely required; then evaluate safe-task aliases or established `Task<T>`. |
+| Established/movable Folly task API | `coro::Task<T>` | Borrowed lifetimes are hard to prove: redesign ownership or use safer task/closure facilities. |
 | CPU work | `CPUThreadPoolExecutor` | Work is I/O readiness handling: use an I/O executor/event base. |
 | Network payload | `IOBuf` chain | A foreign API requires contiguous memory: coalesce at that edge. |
+| Async stream | `AsyncGenerator` for pull, bounded queue/channel for producer-driven flow | Fan-out, merge, transforms, or multiplexing justify `folly::channels`. |
+| Live configuration | `observer::Observer<T>` snapshot | A hot read path justifies a specialized observer cache. |
 | SPSC handoff | `ProducerConsumerQueue` | More producers/consumers require MPMC semantics. |
 | Read-mostly shared lifetime | mutex/`shared_ptr` | Measurements justify hazard pointers or RCU complexity. |
 
-## 13. Failure modes worth memorizing
+## 14. Failure modes worth memorizing
 
 1. **Blocking an event loop.** One slow callback delays every connection on
    that loop.
@@ -534,8 +1019,16 @@ happens synchronously.
     be observed, followed by cleanup/joining.
 12. **Depending on ABI or internal APIs.** Pin Folly versions and rebuild
     dependents together.
+13. **Launching unbounded concurrency.** One task per item can overwhelm
+    queues, memory, downstream services, or file descriptors; use windowing,
+    capacity, and admission control.
+14. **Assuming a Folly type is faster by definition.** Platform, key/value
+    shape, contention, allocator, and workload determine the result.
+15. **Ignoring shutdown.** Executors, scopes, transports, log writers, and
+    producers need an ordering that stops admission, requests cancellation,
+    joins work, flushes output, and only then destroys dependencies.
 
-## 14. Reading the repository's `folly-task` example correctly
+## 15. Reading the repository's `folly-task` example correctly
 
 The local example is one narrow slice through the larger stack:
 
@@ -554,6 +1047,19 @@ Synchronous application boundary:
 Task -> co_withExecutor -> TaskWithExecutor -> start -> SemiFuture -> get
 ```
 
+| Source location | Folly concept |
+| --- | --- |
+| `TaskExample::makeMessage(std::string name)` | A call creates a lazy `Task<std::string>`. Passing `name` by value gives the coroutine frame ownership of the string. |
+| `co_await loadAnswer()` | Sequential child composition. The child inherits the parent's executor and cancellation context. |
+| `TaskExample::loadAnswer() const` | A member coroutine retains `this` and reads `delay_` after it starts, so `TaskExample` must remain alive. |
+| `co_await coro::sleep(delay_)` | Timer-backed suspension; the CPU worker is not parked during the delay. Cancellation can complete the sleep with `OperationCancelled`. |
+| `co_return` | Stores the task result and makes it available to the awaiting parent/future. |
+| `CPUThreadPoolExecutor` | Supplies the execution resource for runnable coroutine work. |
+| `getKeepAliveToken` + `co_withExecutor` | Makes root executor ownership/binding explicit without starting the task. |
+| `TaskWithExecutor::start()` | Starts eagerly and bridges completion to `SemiFuture<std::string>`. |
+| `SemiFuture::get()` | Blocks only the main thread at the application's synchronous edge and rethrows failures. |
+| Test `blockingWait()` | Drives the awaitable to completion without exposing executor plumbing in a small unit test. |
+
 The child inherits the parent's CPU executor. After `sleep`, the coroutine
 resumes on that executor but not necessarily the same worker thread. The
 `TaskExample` instance stays alive because its member coroutines retain access
@@ -565,7 +1071,23 @@ Folly's event-driven I/O, buffer model, Futures, cancellation, structured
 concurrency, concurrent containers, or production support layers—all of which
 are covered above.
 
-## 15. A practical learning sequence
+The example is correct as written because the owner and executor remain in
+scope until `get()` completes. It still demonstrates the lifetime risk of a
+movable task: returning `messageTask` to a longer-lived subsystem while
+destroying `example` would make the stored member task unsafe.
+
+Useful follow-up exercises are:
+
+1. Add a cancellation source and observe cancellation during `sleep`.
+2. Wrap `loadAnswer` in `coro::timeout` and handle `FutureTimeout`.
+3. Add a second independent load and compare sequential awaits with
+   `collectAll`.
+4. Add a dynamic batch using `collectAllWindowed` to cap concurrency.
+5. Rewrite an immediately-awaited free coroutine as `now_task` on a supported
+   compiler, then see which unsafe storage patterns stop compiling.
+6. Add a `CO_TEST` coroutine test and a manual executor scheduling test.
+
+## 16. A practical learning sequence
 
 1. Learn `StringPiece`/ranges, `Function`, checked conversion, `Expected` or
    `result`, and F14 trade-offs.
@@ -574,8 +1096,8 @@ are covered above.
 3. Learn `Executor`, then contrast CPU and I/O thread pools.
 4. Use `SemiFuture`/`Future` once to understand promise state and executor-aware
    continuations.
-5. Build the same flow with `coro::Task`, cancellation, timeout, and a join
-   scope.
+5. Build the same flow with `coro::Task`, then compare `now_task`; add
+   cancellation, timeout, `collectAll`, and a join scope.
 6. Learn `EventBase` thread affinity and move CPU work off the loop.
 7. Parse and build a protocol using `IOBuf`, `IOBufQueue`, `Cursor`, and
    `Appender` without unnecessary coalescing.
@@ -583,7 +1105,43 @@ are covered above.
 9. Study hazard pointers, RCU, fibers, and specialized locks only when a real
    system or profile requires them.
 
-## 16. Official references
+## 17. Subsystem inventory
+
+This table is a navigation map, not a promise that every header has the same
+stability or portability. Start with a component's public header contract and
+tests before adopting it.
+
+| Area | Representative facilities | Learning priority |
+| --- | --- | --- |
+| Top-level foundations | ranges/string pieces, conversion, formatting, `Function`, `Expected`, `Try`, files, process helpers, initialization | High; these appear throughout Folly APIs. |
+| `algorithm`, `math`, `chrono`, `hash`, `random` | SIMD/algorithm helpers, checked math, time utilities, hashing, fingerprints, random generation | Use selectively; distinguish fast utilities from security contracts. |
+| `container` | F14, small/heap/compact containers, views, access helpers | High when container performance matters; benchmark variants. |
+| `synchronization`, `concurrency` | mutexes, batons, semaphores, atomic structures, concurrent queues/maps, hazard pointers, RCU | High for multithreaded systems; advanced reclamation is specialist material. |
+| `memory` | arenas, allocator adapters, aligned allocation, jemalloc-aware helpers, read-mostly ownership | Medium; crucial after allocation/lifetime profiling. |
+| `functional`, `poly` | invocation, composition, type-erased callables and interfaces | Medium; useful for callback and value-polymorphism designs. |
+| `result` | value/error/stopped carriers, rich errors, coroutine propagation | High for new failure-aware APIs, but version-sensitive. |
+| `json`, `dynamic` | dynamic values, JSON parse/serialize, JSON pointer and patch | High at untyped boundaries; convert to static domain types afterward. |
+| `executors` | CPU/I/O pools, serial/strand/manual/inline/scheduled/metered executors | High; scheduling is the foundation of every Folly async model. |
+| `futures` | Promise/Future/SemiFuture, continuation and collection utilities | High for existing Folly systems and callback integration. |
+| `coro`, `coro/safe` | tasks, safe task wrappers, scopes, cancellation, collection, synchronization, generators, queues | High for modern asynchronous code. |
+| `fibers` | stackful cooperative tasks, fiber synchronization and event-loop controllers | Learn when maintaining a fiber-based subsystem. |
+| `channels` | async sender/receiver flows, transforms, merge, fan-out, multiplexing, rate limiting | Medium for complex streaming topologies. |
+| `io`, `io/async`, `io/coro` | `IOBuf`, cursors, queues, event loops, sockets, transports, timers, coroutine transport wrappers | High for networking and service infrastructure. |
+| `net`, `ssl` | network utilities, addresses, TLS contexts/transports/certificates | High for secure networking; platform and OpenSSL details matter. |
+| `codec`, `compression`, `crypto` | hex/UUID/varint utilities, compression codecs and context pools, low-level crypto helpers | Adopt per need; validate optional dependencies and security properties. |
+| `observer`, `settings` | dependency-tracked configuration snapshots and runtime settings | Medium to high for long-running configurable services. |
+| `stats`, `logging`, `tracing`, `debugging` | time series, histograms, quantiles, log pipelines, async stacks, symbolization and exception tracing | High for operable production services. |
+| `gen` | lazy sequence comprehensions and parallel transforms | Compare with C++ ranges for new portable code. |
+| `init`, `cli`, `system` | process setup, command-line helpers, OS/architecture utilities | Use at executable and platform boundaries. |
+| `testing` and test helpers | temporary resources, coroutine/Future test support, deterministic execution tools | High for verifying async and concurrent code. |
+| `portability`, `lang`, `ext` | compiler/OS abstraction and language-building utilities | Mostly infrastructure; depend only on documented public symbols. |
+| `python` | bridges such as an asyncio executor | Specialized interoperability. |
+
+Folly deliberately stops below a complete application/service framework.
+Projects such as Wangle and fbthrift build higher-level networking or RPC
+abstractions on top of Folly and have their own contracts and release concerns.
+
+## 18. Official references
 
 - [Folly repository and build/compatibility notes](https://github.com/facebook/folly)
 - [Official component overview](https://github.com/facebook/folly/blob/main/folly/docs/Overview.md)
@@ -591,13 +1149,27 @@ are covered above.
 - [Executors](https://github.com/facebook/folly/blob/main/folly/docs/Executors.md)
 - [Futures](https://github.com/facebook/folly/blob/main/folly/docs/Futures.md)
 - [Coroutines](https://github.com/facebook/folly/blob/main/folly/coro/README.md)
+- [`Task` and `TaskWithExecutor`](https://github.com/facebook/folly/blob/main/folly/coro/Task.h)
+- [`now_task`](https://github.com/facebook/folly/blob/main/folly/coro/safe/NowTask.h)
+- [`safe_task` and task aliases](https://github.com/facebook/folly/blob/main/folly/coro/safe/SafeTask.h)
+- [Coroutine collection](https://github.com/facebook/folly/blob/main/folly/coro/Collect.h)
+- [`AsyncScope` and `CancellableAsyncScope`](https://github.com/facebook/folly/blob/main/folly/coro/AsyncScope.h)
+- [Cancellation tokens](https://github.com/facebook/folly/blob/main/folly/CancellationToken.h)
+- [Coroutine timeouts](https://github.com/facebook/folly/blob/main/folly/coro/Timeout.h)
 - [Synchronized](https://github.com/facebook/folly/blob/main/folly/docs/Synchronized.md)
 - [Hazard pointers and RCU](https://github.com/facebook/folly/blob/main/folly/docs/Hazptr.md)
 - [F14 containers](https://github.com/facebook/folly/blob/main/folly/container/F14.md)
+- [`fbstring` implementation and storage categories](https://github.com/facebook/folly/blob/main/folly/FBString.h)
 - [Arena and `SysArena`](https://github.com/facebook/folly/blob/main/folly/memory/Arena.h)
 - [`ThreadCachedArena`](https://github.com/facebook/folly/blob/main/folly/memory/ThreadCachedArena.h)
 - [`AtomicHashMap`](https://github.com/facebook/folly/blob/main/folly/AtomicHashMap.h)
 - [`ConcurrentSkipList`](https://github.com/facebook/folly/blob/main/folly/ConcurrentSkipList.h)
 - [`IOBuf` contract](https://github.com/facebook/folly/blob/main/folly/io/IOBuf.h)
 - [`Cursor`, `Appender`, and `QueueAppender`](https://github.com/facebook/folly/blob/main/folly/io/Cursor.h)
+- [`EventBase`](https://github.com/facebook/folly/blob/main/folly/io/async/EventBase.h)
+- [`AsyncSocket`](https://github.com/facebook/folly/blob/main/folly/io/async/AsyncSocket.h)
+- [`AsyncGenerator`](https://github.com/facebook/folly/blob/main/folly/coro/AsyncGenerator.h)
+- [Channels](https://github.com/facebook/folly/tree/main/folly/channels)
+- [Observers](https://github.com/facebook/folly/blob/main/folly/observer/Observer.h)
+- [Compression](https://github.com/facebook/folly/blob/main/folly/compression/Compression.h)
 - [`result<T>`](https://github.com/facebook/folly/blob/main/folly/result/README.md)
