@@ -1,8 +1,8 @@
 # bofeng-cpp
 
-`bofeng-cpp` is a C++23 learning project with small applications built using
-[Meta Folly](https://github.com/facebook/folly). Folly is an external dependency
-and is not copied into this repository.
+`bofeng-cpp` is a C++23 project for building small applications and testing
+APIs from [Meta Folly](https://github.com/facebook/folly) and
+[Abseil](https://github.com/abseil/abseil-cpp). 
 
 ## Applications
 
@@ -16,6 +16,7 @@ and is not copied into this repository.
 - CMake 3.24 or newer
 - A compiler with C++23 support
 - Folly and its dependencies
+- Abseil when building Abseil examples
 - GoogleTest when tests are enabled
 
 ### macOS with Homebrew
@@ -26,10 +27,10 @@ Install the Xcode Command Line Tools if they are not already available:
 xcode-select --install
 ```
 
-Install CMake and Folly:
+Install CMake, Folly, Abseil, and GoogleTest:
 
 ```sh
-brew install cmake folly googletest
+brew install cmake folly abseil googletest
 ```
 
 ## Configure and build
@@ -43,9 +44,9 @@ cmake -S . -B build \
 cmake --build build --parallel
 ```
 
-`CMAKE_PREFIX_PATH` tells CMake where Homebrew installed Folly. When Folly is
-installed somewhere else, replace `$(brew --prefix)` with that installation
-prefix.
+`CMAKE_PREFIX_PATH` tells CMake where Homebrew installed external packages such
+as Folly and Abseil. When they are installed somewhere else, replace
+`$(brew --prefix)` with the appropriate installation prefix.
 
 ## Run the examples
 
@@ -71,7 +72,7 @@ Testing is enabled by default. To configure without tests, pass
 ## Use CLion
 
 Open the repository root as a CMake project and reload CMake. If CLion cannot
-find Folly, add the following to the active CMake profile's options:
+find Folly or Abseil, add the following to the active CMake profile's options:
 
 ```text
 -DCMAKE_PREFIX_PATH=/opt/homebrew
