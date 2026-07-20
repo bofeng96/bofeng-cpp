@@ -1,9 +1,11 @@
 # Meta Folly: a practical mental model and guide to its critical primitives
 
-This guide targets Folly `2026.07.06.00`, the version installed with Homebrew
-when it was written. Folly publishes frequently and makes no ABI-compatibility
-guarantee from commit to commit. Treat names and signatures as versioned; treat
-the architectural relationships in this guide as the durable knowledge.
+This is a standalone guide to modern Folly rather than a description of one
+application or installation. Folly publishes frequently and makes no
+ABI-compatibility guarantee from commit to commit. The examples favor current
+public APIs, but exact availability and signatures can vary by release. Treat
+names and signatures as versioned; treat the architectural relationships as
+the durable knowledge.
 
 ## Table of contents
 
@@ -16,12 +18,13 @@ the architectural relationships in this guide as the durable knowledge.
 7. [`EventBase`: the I/O reactor](#7-eventbase-the-io-reactor)
 8. [Futures: callback-based asynchronous composition](#8-futures-callback-based-asynchronous-composition)
 9. [Coroutines: direct-style asynchronous composition](#9-coroutines-direct-style-asynchronous-composition)
+   - [A progressive `Task` tutorial](#a-progressive-task-tutorial)
 10. [Fibers: stackful cooperative concurrency](#10-fibers-stackful-cooperative-concurrency)
 11. [Context propagation, configuration, and observability](#11-context-propagation-configuration-and-observability)
 12. [Build, versioning, and portability](#12-build-versioning-and-portability)
 13. [A decision guide](#13-a-decision-guide)
 14. [Failure modes worth memorizing](#14-failure-modes-worth-memorizing)
-15. [Reading the repository's `folly-task` example correctly](#15-reading-the-repositorys-folly-task-example-correctly)
+15. [Worked design: an asynchronous aggregation pipeline](#15-worked-design-an-asynchronous-aggregation-pipeline)
 16. [A practical learning sequence](#16-a-practical-learning-sequence)
 17. [Subsystem inventory](#17-subsystem-inventory)
 18. [Official references](#18-official-references)
@@ -150,13 +153,14 @@ unless a Folly API or Folly-specific operation makes `StringPiece` useful.
 - `small_vector<T, N>` keeps a small number of elements inline, avoiding a heap
   allocation until it grows beyond its inline capacity.
 
-For one-byte characters on a 64-bit build, the installed `fbstring` core uses
+For one-byte characters on a representative modern 64-bit build, `fbstring`
+uses
 three storage categories: small strings are stored inline, medium strings use
 an allocation and copy eagerly, and large strings use reference-counted storage
-with lazy copying. The current thresholds are 0–23, 24–254, and 255+ characters,
-respectively, but those are implementation details rather than a portable API
-contract. Allocations use Folly's allocator-size helpers and can benefit from
-jemalloc-aware builds.
+with lazy copying. Some current implementations use thresholds of 0–23,
+24–254, and 255+ characters, respectively, but these are implementation details
+rather than a portable API contract. Allocations use Folly's allocator-size
+helpers and can benefit from jemalloc-aware builds.
 
 Default to standard containers. Switch only after measuring or when an API
 requires the Folly type. Inline containers increase the size of every owning
@@ -540,8 +544,8 @@ sequential, but execution remains lazy, executor-driven, and cooperative.
 
 ### The task family: which type to use
 
-The installed Folly version contains both the established movable `Task` API
-and newer task wrappers designed to prevent coroutine lifetime bugs.
+Modern Folly contains both the established movable `Task` API and newer task
+wrappers designed to prevent coroutine lifetime bugs.
 
 | Type | Meaning and appropriate use |
 | --- | --- |
@@ -555,6 +559,199 @@ Folly version before making it a public API. For learning Folly and integrating
 with established code, understand `Task` first; for new production coroutine
 APIs, evaluate `now_task` and the safe aliases rather than defaulting to a
 movable task.
+
+### A progressive `Task` tutorial
+
+This tutorial follows one operation from definition to production-style
+execution. The examples use movable `Task` because it is the established API
+and remains common in Folly interfaces. The same ownership, executor, and
+cancellation questions still apply when adopting safer task variants.
+
+#### Step 1: define one lazy operation
+
+```cpp
+#include <folly/coro/Sleep.h>
+#include <folly/coro/Task.h>
+
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+folly::coro::Task<int> loadAnswer() {
+  co_await folly::coro::sleep(10ms);
+  co_return 42;
+}
+```
+
+Calling `loadAnswer()` creates one task but does not run its body:
+
+```cpp
+auto task = loadAnswer();  // suspended; the timer has not started
+```
+
+Treat the coroutine function as a reusable factory and each returned `Task` as
+one single-use invocation. To execute the operation again, call the function
+again; never try to await the same task twice.
+
+#### Step 2: compose child tasks
+
+```cpp
+#include <folly/Format.h>
+
+folly::coro::Task<std::string> makeMessage(std::string name) {
+  const int answer = co_await loadAnswer();
+  co_return folly::sformat("Hello, {}: {}", name, answer);
+}
+```
+
+`loadAnswer()` is a temporary task, so `co_await` consumes it directly. If a
+task has first been stored in a named variable, move it at the consuming point:
+
+```cpp
+auto child = loadAnswer();
+const int answer = co_await std::move(child);
+// child is consumed and must not be used again
+```
+
+Take ordinary inputs by value when the coroutine should own them. A reference
+parameter remains borrowed even though the coroutine is suspended:
+
+```cpp
+folly::coro::Task<void> unsafeIfCallerDies(const Request& request);
+folly::coro::Task<void> ownsItsInput(Request request);
+```
+
+#### Step 3: repeat sequentially or concurrently
+
+For sequential repetition, create and await a fresh task on each iteration:
+
+```cpp
+folly::coro::Task<std::vector<int>> loadSequentially(std::size_t count) {
+  std::vector<int> results;
+  results.reserve(count);
+
+  for (std::size_t i = 0; i < count; ++i) {
+    results.push_back(co_await loadAnswer());
+  }
+
+  co_return results;
+}
+```
+
+For concurrent repetition, create fresh tasks and give ownership of the entire
+collection to a collection combinator:
+
+```cpp
+#include <folly/coro/Collect.h>
+
+folly::coro::Task<std::vector<int>> loadConcurrently(std::size_t count) {
+  std::vector<folly::coro::Task<int>> tasks;
+  tasks.reserve(count);
+
+  for (std::size_t i = 0; i < count; ++i) {
+    tasks.push_back(loadAnswer());
+  }
+
+  co_return co_await folly::coro::collectAllRange(std::move(tasks));
+}
+```
+
+Use `collectAllWindowed` rather than creating an unbounded number of active
+operations when `count` can be large or the downstream dependency has a
+concurrency limit.
+
+#### Step 4: enter from synchronous code
+
+A root task has no parent from which to inherit an executor. Bind it to an
+executor, start it, and consume the returned future at the synchronous edge:
+
+```cpp
+#include <folly/executors/CPUThreadPoolExecutor.h>
+
+folly::CPUThreadPoolExecutor executor{4};
+auto keepAlive = folly::Executor::getKeepAliveToken(executor);
+
+auto task = makeMessage("Bofeng");
+auto bound = folly::coro::co_withExecutor(keepAlive, std::move(task));
+auto future = std::move(bound).start();
+
+std::string message = std::move(future).get();
+```
+
+The ownership flow is:
+
+```text
+fresh Task
+   --co_withExecutor--> TaskWithExecutor
+   --start-----------> running operation + SemiFuture
+   --get-------------> value or rethrown exception
+```
+
+`get()` blocks the current thread. Use it only at a top-level synchronous
+boundary, never inside an event-loop callback or another coroutine. A small
+unit test can instead use `blockingWait(makeMessage("Bofeng"))` without
+creating a pool explicitly.
+
+#### Step 5: handle failures with normal control flow
+
+```cpp
+folly::coro::Task<Response> loadWithFallback() {
+  try {
+    co_return co_await fetchPrimary();
+  } catch (const TemporaryError&) {
+    co_return co_await fetchBackup();
+  }
+}
+```
+
+An exception is captured in the child task and rethrown at its consuming
+`co_await`. Catch it where recovery is meaningful. Use `co_awaitTry` or
+`collectAllTry` when the exception should instead be inspected as data.
+
+#### Step 6: add a deadline and cancellation policy
+
+```cpp
+#include <folly/coro/Timeout.h>
+
+folly::coro::Task<Response> fetchBeforeDeadline() {
+  using namespace std::chrono_literals;
+  co_return co_await folly::coro::timeout(fetchPrimary(), 500ms);
+}
+```
+
+When the deadline wins, `timeout` requests cancellation and reports
+`folly::FutureTimeout`. The child must cooperate with cancellation; a timeout
+cannot forcibly terminate blocking code. At a service boundary, decide whether
+the timeout is retried, translated to a domain error, or allowed to propagate.
+
+#### Step 7: preserve owner lifetime
+
+A non-static member coroutine borrows its object through `this`:
+
+```cpp
+Service service;
+auto task = service.fetch();
+// service must remain alive until task completes
+```
+
+Prefer structured nesting: await the task before the owner leaves scope, or
+place dynamically launched children in an `AsyncScope` and join it. Capturing
+`shared_ptr<Service>` is appropriate only when shared lifetime is genuinely the
+desired ownership model; it should not be an automatic substitute for joining.
+
+#### Step 8: test the asynchronous behavior
+
+```cpp
+TEST(MessageTest, BuildsMessage) {
+  EXPECT_EQ(
+      folly::coro::blockingWait(makeMessage("Bofeng")),
+      "Hello, Bofeng: 42");
+}
+```
+
+Keep unit tests fast and deterministic. Inject zero delays, fake dependencies,
+or controllable executors rather than sleeping in real time. Add separate tests
+for success, child failure, timeout, cancellation, and owner shutdown.
 
 ### `Task<T>` semantics
 
@@ -642,7 +839,7 @@ Response response = std::move(result).get();  // synchronous edge only
 ```
 
 `scheduleOn()` is the older spelling for binding a task and is deprecated in
-the installed version; prefer `co_withExecutor()`.
+recent Folly releases; prefer `co_withExecutor()` where available.
 
 ### Sequential versus concurrent composition
 
@@ -1028,64 +1225,119 @@ For an upgrade:
     producers need an ordering that stops admission, requests cancellation,
     joins work, flushes output, and only then destroys dependencies.
 
-## 15. Reading the repository's `folly-task` example correctly
+## 15. Worked design: an asynchronous aggregation pipeline
 
-The local example is one narrow slice through the larger stack:
+Consider a request handler that loads two independent resources, enriches a
+variable number of results, and returns a response under a deadline. This
+small design exercises the relationships that matter in a real Folly service:
 
 ```text
-TaskExample::makeMessage(name)                 lazy Task<string>
-        |
-        | co_await loadAnswer()
-        v
-TaskExample::loadAnswer()                      lazy child Task<int>
-        |
-        | co_await folly::coro::sleep(delay)
-        v
-co_return 42 -> format message -> co_return string
+incoming request
+      |
+      v
+root Task bound to an I/O executor
+      |
+      +---- collectAll ---- load primary data
+      |                 \\- load recommendations
+      |
+      v
+bounded concurrent enrichment
+      |
+      v
+assemble response in owned IOBufs
+      |
+      v
+write through AsyncTransport -> complete request scope
 
-Synchronous application boundary:
-Task -> co_withExecutor -> TaskWithExecutor -> start -> SemiFuture -> get
+deadline or shutdown
+      -> request cancellation
+      -> children clean up
+      -> parent joins them
+      -> release request state
 ```
 
-| Source location | Folly concept |
+The outer coroutine owns the request value and composes independently useful
+operations concurrently:
+
+```cpp
+folly::coro::Task<Page> buildPage(Request request) {
+  auto [profile, recommendations] =
+      co_await folly::coro::collectAll(
+          loadProfile(request.userId),
+          loadRecommendations(request.userId));
+
+  auto cards = co_await enrichWithConcurrencyLimit(
+      std::move(recommendations), 16);
+
+  co_return Page{
+      .profile = std::move(profile),
+      .cards = std::move(cards),
+  };
+}
+```
+
+This design makes several policies explicit:
+
+| Question | Design choice |
 | --- | --- |
-| `TaskExample::makeMessage(std::string name)` | A call creates a lazy `Task<std::string>`. Passing `name` by value gives the coroutine frame ownership of the string. |
-| `co_await loadAnswer()` | Sequential child composition. The child inherits the parent's executor and cancellation context. |
-| `TaskExample::loadAnswer() const` | A member coroutine retains `this` and reads `delay_` after it starts, so `TaskExample` must remain alive. |
-| `co_await coro::sleep(delay_)` | Timer-backed suspension; the CPU worker is not parked during the delay. Cancellation can complete the sleep with `OperationCancelled`. |
-| `co_return` | Stores the task result and makes it available to the awaiting parent/future. |
-| `CPUThreadPoolExecutor` | Supplies the execution resource for runnable coroutine work. |
-| `getKeepAliveToken` + `co_withExecutor` | Makes root executor ownership/binding explicit without starting the task. |
-| `TaskWithExecutor::start()` | Starts eagerly and bridges completion to `SemiFuture<std::string>`. |
-| `SemiFuture::get()` | Blocks only the main thread at the application's synchronous edge and rethrows failures. |
-| Test `blockingWait()` | Drives the awaitable to completion without exposing executor plumbing in a small unit test. |
+| Who owns request data? | The outer coroutine takes `Request` by value, so suspended work does not borrow a caller's temporary. |
+| Which work is concurrent? | Only independent loads and explicitly windowed enrichment operations. |
+| Where does work resume? | Child tasks inherit the parent executor unless explicitly rebound. |
+| What limits fan-out? | The enrichment stage has a fixed concurrency window rather than launching one active operation per item. |
+| How do failures propagate? | `collectAll` cancels outstanding siblings, waits for them, and rethrows a failure. Use `collectAllTry` if partial results are part of the contract. |
+| What happens on timeout? | The request boundary asks the task tree to cancel and does not release request-owned state until children finish. |
+| Where may blocking occur? | Nowhere on the I/O path; CPU-heavy transformation is explicitly moved to a CPU executor. |
 
-The child inherits the parent's CPU executor. After `sleep`, the coroutine
-resumes on that executor but not necessarily the same worker thread. The
-`TaskExample` instance stays alive because its member coroutines retain access
-to it. The test uses `blockingWait` as a synchronous boundary; production async
-code should normally keep composing with `co_await`.
+Apply the deadline at the boundary that owns the user-visible latency policy:
 
-This example teaches task composition and executor binding. It does not cover
-Folly's event-driven I/O, buffer model, Futures, cancellation, structured
-concurrency, concurrent containers, or production support layers—all of which
-are covered above.
+```cpp
+folly::coro::Task<Page> serve(Request request) {
+  using namespace std::chrono_literals;
 
-The example is correct as written because the owner and executor remain in
-scope until `get()` completes. It still demonstrates the lifetime risk of a
-movable task: returning `messageTask` to a longer-lived subsystem while
-destroying `example` would make the stored member task unsafe.
+  try {
+    co_return co_await folly::coro::timeout(
+        buildPage(std::move(request)), 750ms);
+  } catch (const folly::FutureTimeout&) {
+    throw ServiceUnavailable{"request deadline exceeded"};
+  }
+}
+```
 
-Useful follow-up exercises are:
+The timeout is useful only if leaf operations cooperate. Socket operations,
+queues, timers, and nested tasks should observe the inherited cancellation
+token or adapt it to their underlying cancellation mechanism. A blocking
+third-party call that ignores cancellation must run on an appropriate executor
+and may continue after the caller's deadline; capacity planning must account
+for that behavior.
 
-1. Add a cancellation source and observe cancellation during `sleep`.
-2. Wrap `loadAnswer` in `coro::timeout` and handle `FutureTimeout`.
-3. Add a second independent load and compare sequential awaits with
-   `collectAll`.
-4. Add a dynamic batch using `collectAllWindowed` to cap concurrency.
-5. Rewrite an immediately-awaited free coroutine as `now_task` on a supported
-   compiler, then see which unsafe storage patterns stop compiling.
-6. Add a `CO_TEST` coroutine test and a manual executor scheduling test.
+If response serialization is significant CPU work, make the executor switch
+visible instead of performing it on the event-loop thread:
+
+```cpp
+auto response = co_await folly::coro::co_withExecutor(
+    cpuExecutor, encodePage(std::move(page)));
+```
+
+The complete request scope must retain the service objects, executor keep-alive
+tokens, buffers, and transport callbacks used by its children. During shutdown,
+stop admitting requests, request cancellation, join outstanding scopes, close
+transports, flush observability output, and only then destroy executors and
+dependencies.
+
+Useful exercises for understanding the design are:
+
+1. Change the independent loads to sequential awaits and measure latency.
+2. Replace `collectAll` with `collectAllTry` and define a partial-response
+   policy.
+3. Vary the enrichment window and measure throughput, tail latency, queueing,
+   and downstream load.
+4. Inject cancellation during every await point and verify cleanup and joining.
+5. Move an expensive transformation between the I/O and CPU executors and
+   observe event-loop delay.
+6. Represent the response as an `IOBuf` chain, then measure the cost of
+   unnecessary coalescing.
+7. Test shutdown with requests active and verify that no callback observes a
+   destroyed owner.
 
 ## 16. A practical learning sequence
 
