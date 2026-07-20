@@ -2,6 +2,120 @@
 
 [← Folly guide index](README.md)
 
+## Contents
+
+- [A progressive foundation-types tutorial](#a-progressive-foundation-types-tutorial)
+- [Foundation types and value handling](#foundation-types-and-value-handling)
+- [`Range` and `StringPiece`](#ranget-and-stringpiece)
+- [Containers and allocation](#fbstring-fbvector-and-small_vector)
+- [Values, errors, JSON, and conversion](#values-errors-and-exceptions)
+- [RAII and algorithms](#raii-lifetime-and-operating-system-helpers)
+
+## A progressive foundation-types tutorial
+
+Folly's foundation types are most useful at boundaries: borrowed input, owned
+callbacks, explicit errors, hot containers, byte ownership, parsing, and
+cleanup. Do not replace standard-library types mechanically.
+
+### Step 1: decide whether a value is owned or borrowed
+
+```cpp
+std::size_t countFields(folly::StringPiece line) {
+   std::vector<folly::StringPiece> fields;
+   folly::split(',', line, fields);
+   return fields.size();
+}
+```
+
+`StringPiece` is a non-owning view. This function is safe because every slice
+is consumed before `line`'s owner can disappear. Returning those slices would
+transfer a lifetime obligation to the caller.
+
+Use an owning type when data crosses an asynchronous or storage boundary:
+
+```cpp
+folly::coro::Task<Result> process(std::string input) {
+   co_return co_await parseOwned(std::move(input));
+}
+```
+
+The same rule applies to `Range`, spans, iterators, cursors, and views: cheap
+borrowing is valuable only when lifetime is obvious.
+
+### Step 2: use move-only callbacks to express ownership
+
+```cpp
+folly::Function<void()> completion =
+   [state = std::make_unique<State>()]() mutable {
+      state->finish();
+   };
+```
+
+`folly::Function` can own move-only captures. Use it when a callback is
+transferred to exactly one owner. Use a non-owning function reference only for
+immediate invocation whose callable unquestionably outlives the call.
+
+### Step 3: choose one failure vocabulary
+
+```cpp
+folly::Expected<Port, ParseError> parsePort(folly::StringPiece text) {
+   auto value = folly::tryTo<unsigned>(text);
+   if (value.hasError() || *value > 65535) {
+      return folly::makeUnexpected(ParseError::InvalidPort);
+   }
+   return Port{static_cast<std::uint16_t>(*value)};
+}
+```
+
+Use `Expected<T, E>` when callers are expected to branch on a typed domain
+error. Use `Try<T>` when transporting exceptions through Future machinery, and
+newer `result<T>` APIs when value/error/stopped propagation matches the chosen
+release. Avoid representing the same failure as a sentinel, exception, and
+error enum at adjacent layers.
+
+### Step 4: select containers from semantics, then benchmark
+
+```text
+Need portable general-purpose storage?       -> std container
+Need a few values inline?                    -> small_vector
+Need a Folly hash-table performance profile? -> choose an F14 variant
+Need stable addresses?                       -> node-based representation
+Need one shared allocation lifetime?         -> arena, after profiling
+```
+
+Container selection must include invalidation, iteration, key distribution,
+object size, allocator behavior, and target CPU—not only lookup benchmarks.
+
+### Step 5: parse untyped input, then leave the dynamic boundary
+
+```cpp
+folly::dynamic document = folly::parseJson(serialized);
+
+Config config{
+   .endpoint = document.at("endpoint").asString(),
+   .retries = document.at("retries").asInt(),
+};
+```
+
+Validate required fields, types, ranges, unknown-field policy, and input size.
+Convert to a statically typed domain object once validation succeeds; allowing
+`dynamic` to spread through core logic postpones errors and obscures contracts.
+
+### Step 6: make cleanup unconditional with RAII
+
+```cpp
+auto rollback = folly::makeGuard([&] {
+   transaction.rollback();
+});
+
+transaction.commit();
+rollback.dismiss();
+```
+
+Scope guards are appropriate for local rollback and release. Asynchronous
+cleanup that itself requires awaiting cannot be hidden in an ordinary
+destructor; place it in a joined scope or explicit async cleanup path.
+
 ## Foundation types and value handling
 
 ### `Range<T>` and `StringPiece`
