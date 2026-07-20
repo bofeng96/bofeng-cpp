@@ -16,6 +16,8 @@ Meta Folly.
   "the installed version".
 - Keep examples generic and self-contained. Use invented domain names where a
   scenario helps explain an API.
+- Use three spaces per indentation level in C++ code fences, including
+  continuation indentation.
 - Describe version-sensitive APIs as such and direct readers to the official
   upstream header or documentation. References to the official Facebook Folly
   repository are allowed and encouraged.
@@ -23,4 +25,3 @@ Meta Folly.
   code in this workspace.
 - Before completing an edit, search the guide for local paths and
   workspace-specific references and remove them.
-

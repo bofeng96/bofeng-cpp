@@ -44,8 +44,8 @@ cancellation questions still apply when adopting safer task variants.
 using namespace std::chrono_literals;
 
 folly::coro::Task<int> loadAnswer() {
-  co_await folly::coro::sleep(10ms);
-  co_return 42;
+   co_await folly::coro::sleep(10ms);
+   co_return 42;
 }
 ```
 
@@ -65,8 +65,8 @@ again; never try to await the same task twice.
 #include <folly/Format.h>
 
 folly::coro::Task<std::string> makeMessage(std::string name) {
-  const int answer = co_await loadAnswer();
-  co_return folly::sformat("Hello, {}: {}", name, answer);
+   const int answer = co_await loadAnswer();
+   co_return folly::sformat("Hello, {}: {}", name, answer);
 }
 ```
 
@@ -93,14 +93,14 @@ For sequential repetition, create and await a fresh task on each iteration:
 
 ```cpp
 folly::coro::Task<std::vector<int>> loadSequentially(std::size_t count) {
-  std::vector<int> results;
-  results.reserve(count);
+   std::vector<int> results;
+   results.reserve(count);
 
-  for (std::size_t i = 0; i < count; ++i) {
-    results.push_back(co_await loadAnswer());
-  }
+   for (std::size_t i = 0; i < count; ++i) {
+      results.push_back(co_await loadAnswer());
+   }
 
-  co_return results;
+   co_return results;
 }
 ```
 
@@ -111,14 +111,14 @@ collection to a collection combinator:
 #include <folly/coro/Collect.h>
 
 folly::coro::Task<std::vector<int>> loadConcurrently(std::size_t count) {
-  std::vector<folly::coro::Task<int>> tasks;
-  tasks.reserve(count);
+   std::vector<folly::coro::Task<int>> tasks;
+   tasks.reserve(count);
 
-  for (std::size_t i = 0; i < count; ++i) {
-    tasks.push_back(loadAnswer());
-  }
+   for (std::size_t i = 0; i < count; ++i) {
+      tasks.push_back(loadAnswer());
+   }
 
-  co_return co_await folly::coro::collectAllRange(std::move(tasks));
+   co_return co_await folly::coro::collectAllRange(std::move(tasks));
 }
 ```
 
@@ -162,11 +162,11 @@ creating a pool explicitly.
 
 ```cpp
 folly::coro::Task<Response> loadWithFallback() {
-  try {
-    co_return co_await fetchPrimary();
-  } catch (const TemporaryError&) {
-    co_return co_await fetchBackup();
-  }
+   try {
+      co_return co_await fetchPrimary();
+   } catch (const TemporaryError&) {
+      co_return co_await fetchBackup();
+   }
 }
 ```
 
@@ -180,8 +180,8 @@ An exception is captured in the child task and rethrown at its consuming
 #include <folly/coro/Timeout.h>
 
 folly::coro::Task<Response> fetchBeforeDeadline() {
-  using namespace std::chrono_literals;
-  co_return co_await folly::coro::timeout(fetchPrimary(), 500ms);
+   using namespace std::chrono_literals;
+   co_return co_await folly::coro::timeout(fetchPrimary(), 500ms);
 }
 ```
 
@@ -209,7 +209,7 @@ desired ownership model; it should not be an automatic substitute for joining.
 
 ```cpp
 TEST(MessageTest, BuildsMessage) {
-  EXPECT_EQ(
+   EXPECT_EQ(
       folly::coro::blockingWait(makeMessage("Bofeng")),
       "Hello, Bofeng: 42");
 }
@@ -227,8 +227,8 @@ job object.
 
 ```cpp
 folly::coro::Task<Response> fetch(Request request) {
-  auto bytes = co_await read(std::move(request));
-  co_return decode(bytes);
+   auto bytes = co_await read(std::move(request));
+   co_return decode(bytes);
 }
 ```
 
@@ -275,10 +275,10 @@ not worker-thread stickiness: a CPU pool may select a different worker.
 
 ```cpp
 folly::coro::Task<void> parent(folly::Executor::KeepAlive<> other) {
-  auto* original = co_await folly::coro::co_current_executor;
-  co_await child();  // child inherits original
-  co_await folly::coro::co_withExecutor(other, child());
-  // Parent resumes on original after the explicitly rebound child completes.
+   auto* original = co_await folly::coro::co_current_executor;
+   co_await child();  // child inherits original
+   co_await folly::coro::co_withExecutor(other, child());
+   // Parent resumes on original after the explicitly rebound child completes.
 }
 ```
 
@@ -383,9 +383,9 @@ Within a Folly task:
 
 ```cpp
 const auto& token =
-    co_await folly::coro::co_current_cancellation_token;
+   co_await folly::coro::co_current_cancellation_token;
 if (token.isCancellationRequested()) {
-  co_yield folly::coro::co_stopped_may_throw;
+   co_yield folly::coro::co_stopped_may_throw;
 }
 ```
 
@@ -529,18 +529,18 @@ operations concurrently:
 
 ```cpp
 folly::coro::Task<Page> buildPage(Request request) {
-  auto [profile, recommendations] =
+   auto [profile, recommendations] =
       co_await folly::coro::collectAll(
-          loadProfile(request.userId),
-          loadRecommendations(request.userId));
+         loadProfile(request.userId),
+         loadRecommendations(request.userId));
 
-  auto cards = co_await enrichWithConcurrencyLimit(
+   auto cards = co_await enrichWithConcurrencyLimit(
       std::move(recommendations), 16);
 
-  co_return Page{
+   co_return Page{
       .profile = std::move(profile),
       .cards = std::move(cards),
-  };
+   };
 }
 ```
 
@@ -560,14 +560,14 @@ Apply the deadline at the boundary that owns the user-visible latency policy:
 
 ```cpp
 folly::coro::Task<Page> serve(Request request) {
-  using namespace std::chrono_literals;
+   using namespace std::chrono_literals;
 
-  try {
-    co_return co_await folly::coro::timeout(
-        buildPage(std::move(request)), 750ms);
-  } catch (const folly::FutureTimeout&) {
-    throw ServiceUnavailable{"request deadline exceeded"};
-  }
+   try {
+      co_return co_await folly::coro::timeout(
+         buildPage(std::move(request)), 750ms);
+   } catch (const folly::FutureTimeout&) {
+      throw ServiceUnavailable{"request deadline exceeded"};
+   }
 }
 ```
 
@@ -583,7 +583,7 @@ visible instead of performing it on the event-loop thread:
 
 ```cpp
 auto response = co_await folly::coro::co_withExecutor(
-    cpuExecutor, encodePage(std::move(page)));
+   cpuExecutor, encodePage(std::move(page)));
 ```
 
 The complete request scope must retain the service objects, executor keep-alive
@@ -606,4 +606,3 @@ Useful exercises for understanding the design are:
    unnecessary coalescing.
 7. Test shutdown with requests active and verify that no callback observes a
    destroyed owner.
-

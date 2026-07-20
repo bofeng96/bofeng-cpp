@@ -78,7 +78,7 @@ but move-only and able to own move-only captures:
 
 ```cpp
 folly::Function<void()> work =
-    [p = std::make_unique<Job>()]() mutable { p->run(); };
+   [p = std::make_unique<Job>()]() mutable { p->run(); };
 ```
 
 It also models callable constness in the signature. Use it for owned callbacks
@@ -148,4 +148,3 @@ and the `gen` library for lazy pipeline-style sequence processing. In portable
 new code, compare `gen` with C++20 ranges before committing to a Folly-specific
 pipeline. `sorted_vector_map`/`sorted_vector_set` are useful when data changes
 rarely and compact ordered iteration matters more than insertion cost.
-
