@@ -16,6 +16,8 @@ Meta Folly.
   "the installed version".
 - Keep examples generic and self-contained. Use invented domain names where a
   scenario helps explain an API.
+- Use neutral placeholder data in examples. Do not use personal names obtained
+  from the workspace, its paths, or the user.
 - Use three spaces per indentation level in C++ code fences, including
   continuation indentation.
 - Describe version-sensitive APIs as such and direct readers to the official

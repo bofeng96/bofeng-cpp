@@ -137,7 +137,7 @@ executor, start it, and consume the returned future at the synchronous edge:
 folly::CPUThreadPoolExecutor executor{4};
 auto keepAlive = folly::Executor::getKeepAliveToken(executor);
 
-auto task = makeMessage("Bofeng");
+auto task = makeMessage("developer");
 auto bound = folly::coro::co_withExecutor(keepAlive, std::move(task));
 auto future = std::move(bound).start();
 
@@ -155,7 +155,7 @@ fresh Task
 
 `get()` blocks the current thread. Use it only at a top-level synchronous
 boundary, never inside an event-loop callback or another coroutine. A small
-unit test can instead use `blockingWait(makeMessage("Bofeng"))` without
+unit test can instead use `blockingWait(makeMessage("developer"))` without
 creating a pool explicitly.
 
 #### Step 5: handle failures with normal control flow
@@ -210,8 +210,8 @@ desired ownership model; it should not be an automatic substitute for joining.
 ```cpp
 TEST(MessageTest, BuildsMessage) {
    EXPECT_EQ(
-      folly::coro::blockingWait(makeMessage("Bofeng")),
-      "Hello, Bofeng: 42");
+      folly::coro::blockingWait(makeMessage("developer")),
+      "Hello, developer: 42");
 }
 ```
 
