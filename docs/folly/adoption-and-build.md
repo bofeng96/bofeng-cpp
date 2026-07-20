@@ -2,6 +2,95 @@
 
 [← Folly guide index](README.md)
 
+## Contents
+
+- [A progressive adoption tutorial](#a-progressive-adoption-tutorial)
+- [Build, versioning, and portability](#build-versioning-and-portability)
+- [Decision guide](#a-decision-guide)
+- [Failure modes](#failure-modes-worth-memorizing)
+
+## A progressive adoption tutorial
+
+### Step 1: start from a missing contract
+
+Write down the concrete need before selecting a Folly type:
+
+```text
+Problem: callbacks resume on unpredictable threads
+Required contract: caller-selected executor for every continuation
+Candidate: SemiFuture<T> API + caller .via(executor)
+Evidence: scheduling tests and queue-latency measurements
+```
+
+“Folly is faster” is not an adoption requirement. Name the ownership,
+scheduling, concurrency, I/O, or measured performance property that is missing.
+
+### Step 2: draw the execution and ownership boundaries
+
+For an asynchronous component, document:
+
+```text
+caller owns request value
+   -> operation starts on I/O executor
+   -> CPU transformation owns detached bytes
+   -> result returns to event-base thread
+   -> request scope joins before service destruction
+```
+
+Mark every raw pointer, borrowed view, callback, executor token, cancellation
+source, and blocking boundary. If the diagram cannot identify an owner until
+completion, the design is not ready for implementation.
+
+### Step 3: build one vertical slice
+
+Adopt the smallest end-to-end path that exercises the real contract. Include
+success, failure, timeout, cancellation, overload, and shutdown from the first
+slice. A benchmark that excludes ownership and error paths can select the wrong
+primitive.
+
+Keep Folly types behind a narrow module boundary when the rest of the
+application does not need them. This reduces rebuild, upgrade, and API-coupling
+cost without pretending the dependency is free.
+
+### Step 4: pin and reproduce the toolchain
+
+Record the Folly revision or release, compiler, standard-library ABI, build
+options, allocator, optional dependencies, and target platforms. Use C++20 and
+rebuild Folly-dependent binaries together when upgrading.
+
+A successful header-only compilation does not prove binary compatibility.
+Inline implementation, feature macros, compiler flags, and linked dependencies
+must agree across translation units.
+
+### Step 5: validate semantics before performance
+
+Test these contracts before benchmarking:
+
+1. exact ownership and invalidation behavior;
+2. executor and thread-affinity behavior;
+3. exception, timeout, and cancellation propagation;
+4. bounded admission and overload response;
+5. cleanup order with work outstanding;
+6. target-platform fallback behavior.
+
+Then benchmark representative sizes, key distributions, contention, queueing,
+and tail latency. Compare against the simplest standard-library design.
+
+### Step 6: establish an upgrade loop
+
+For each upgrade:
+
+1. read upstream changes for every adopted subsystem;
+2. rebuild the full dependency closure;
+3. compile with deprecation warnings visible;
+4. run sanitizers and concurrency/lifetime tests;
+5. rerun performance baselines on deployment architectures;
+6. canary with queue, error, timeout, and memory monitoring;
+7. retain a rollback artifact and configuration plan.
+
+Avoid depending on `detail`, `internal`, implementation headers, or accidental
+transitive includes. These dramatically increase upgrade risk.
+
 ## Build, versioning, and portability
 
 ### Version and ABI policy
@@ -105,4 +194,3 @@ For an upgrade:
 15. **Ignoring shutdown.** Executors, scopes, transports, log writers, and
     producers need an ordering that stops admission, requests cancellation,
     joins work, flushes output, and only then destroys dependencies.
-
